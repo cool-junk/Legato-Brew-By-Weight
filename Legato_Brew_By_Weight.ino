@@ -14,7 +14,7 @@
 #include <ctype.h>
 
 // Legato brew-by-weight controller: live DOT weight, touch UI, and relay outputs.
-#define LEGATO_FW_VERSION "0.1.0"
+#define LEGATO_FW_VERSION "0.1.1"
 
 #define LVGL_TICK_MS 2
 // Small partial-render buffers keep LVGL in DMA-capable internal RAM; the
@@ -66,6 +66,9 @@ static uint8_t batteryPercent = 0;
 static bool combinedButtonPressed = false;
 static bool combinedLongActionFired = false;
 static uint32_t combinedButtonPressedAt = 0;
+static bool modeButtonPressed = false;
+static bool modeLongActionFired = false;
+static uint32_t modeButtonPressedAt = 0;
 static float liveGrams = 0.0f;
 static float targetGrams = 36.0f;
 static float espressoTargetGrams = 36.0f;
@@ -581,7 +584,7 @@ static void touchRead(lv_indev_drv_t *, lv_indev_data_t *data) {
   // CST9217 until release so a one-second hold is measured reliably. The
   // controller may not return a fresh point on every poll, so retain the last
   // pressed state unless a touch interrupt reports an actual release.
-  if (!touchInterruptPending && !combinedButtonPressed) return;
+  if (!touchInterruptPending && !combinedButtonPressed && !modeButtonPressed) return;
   const uint8_t points = touch.getPoint(touchX, touchY, touch.getSupportTouchPoint());
   touchPending = false;
   if (points) {
@@ -830,7 +833,8 @@ static void updateInfoPage() {
       "\n"
       "Max brew: %lu s   Scale-loss stop: 2.5 s\n"
       "Start limit: %d g   Stop offset: %d g\n"
-      "Uptime: %lu h %lu min",
+      "Uptime: %lu h %lu min\n"
+      "Tap mode to return; hold 3 s for Info",
       LEGATO_FW_VERSION, __DATE__, __TIME__, mode, brewStatus,
       lroundf(targetGrams), weightText, scaleStatus, batteryText,
       RELAY_PRESS_MS, RELAY_MANUAL_PIN, RELAY_AUTO_PIN, RELAY_POWER_PIN,
@@ -890,21 +894,20 @@ static void onTargetPlus(lv_event_t *) {
   Serial.printf("Target increased to %ld g\n", lroundf(targetGrams));
 }
 static void onModeToggle(lv_event_t *) {
-  if (brewState == BREW_RUNNING) {
-    Serial.println("Page change ignored while brewing.");
+  if (modeLongActionFired) {
+    modeLongActionFired = false;
     return;
   }
   if (infoPageActive) {
     infoPageActive = false;
     brewMode = infoReturnMode;
-  } else if (brewState == BREW_FAULT) {
-    infoReturnMode = brewMode;
-    infoPageActive = true;
-  } else if (brewMode == MODE_BEANS) {
-    infoReturnMode = MODE_ESPRESSO;
-    infoPageActive = true;
   } else {
+    if (brewState == BREW_RUNNING || brewState == BREW_FAULT) {
+      Serial.println("Mode changes are disabled while brewing or a fault is latched.");
+      return;
+    }
     brewMode = (BrewMode)(brewMode + 1);
+    if (brewMode > MODE_BEANS) brewMode = MODE_ESPRESSO;
   }
   if (!infoPageActive &&
       (brewState == BREW_COMPLETE || brewState == BREW_STOPPED)) {
@@ -918,6 +921,51 @@ static void onModeToggle(lv_event_t *) {
   updateModeLabel();
   updateDisplayValues();
   updateInfoPage();
+}
+
+static void toggleInfoPage() {
+  if (!infoPageActive && brewState == BREW_RUNNING) {
+    Serial.println("Info page is unavailable while brewing; stop the brew first.");
+    return;
+  }
+  if (infoPageActive) {
+    infoPageActive = false;
+    brewMode = infoReturnMode;
+  } else {
+    infoReturnMode = brewMode;
+    infoPageActive = true;
+  }
+  updateModeLabel();
+  updateDisplayValues();
+  updateInfoPage();
+}
+
+static void onModeButtonGesture(lv_event_t *event) {
+  const lv_event_code_t code = lv_event_get_code(event);
+  if (code == LV_EVENT_PRESSED) {
+    modeButtonPressed = true;
+    modeLongActionFired = false;
+    modeButtonPressedAt = millis();
+  } else if (code == LV_EVENT_RELEASED) {
+    if (!modeButtonPressed) return;
+    const uint32_t heldMs = millis() - modeButtonPressedAt;
+    modeButtonPressed = false;
+    if (!modeLongActionFired && heldMs >= 3000) {
+      modeLongActionFired = true;
+      toggleInfoPage();
+    }
+  } else if (code == LV_EVENT_PRESS_LOST) {
+    modeButtonPressed = false;
+    modeLongActionFired = false;
+  }
+}
+
+static void updateModeButtonHold() {
+  if (!modeButtonPressed || modeLongActionFired) return;
+  if ((uint32_t)(millis() - modeButtonPressedAt) >= 3000) {
+    modeLongActionFired = true;
+    toggleInfoPage();
+  }
 }
 
 static void displayRounder(lv_disp_drv_t *, lv_area_t *area) {
@@ -985,6 +1033,9 @@ static void createUi() {
   lv_obj_set_style_border_width(modeButton, 1, 0);
   lv_obj_set_style_border_color(modeButton, lv_color_hex(0x345344), 0);
   lv_obj_add_event_cb(modeButton, onModeToggle, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_event_cb(modeButton, onModeButtonGesture, LV_EVENT_PRESSED, nullptr);
+  lv_obj_add_event_cb(modeButton, onModeButtonGesture, LV_EVENT_RELEASED, nullptr);
+  lv_obj_add_event_cb(modeButton, onModeButtonGesture, LV_EVENT_PRESS_LOST, nullptr);
   modeButtonLabel = lv_label_create(modeButton);
   lv_obj_set_style_text_color(modeButtonLabel, lv_color_hex(0x77E6A2), 0);
   lv_obj_set_style_text_font(modeButtonLabel, &lv_font_montserrat_24, 0);
@@ -1248,5 +1299,6 @@ void loop() {
   }
   lv_timer_handler();
   updateCombinedButtonHold();
+  updateModeButtonHold();
   delay(5);
 }
