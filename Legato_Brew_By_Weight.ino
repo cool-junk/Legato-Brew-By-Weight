@@ -14,7 +14,7 @@
 #include <ctype.h>
 
 // Legato brew-by-weight controller: live DOT weight, touch UI, and relay outputs.
-#define LEGATO_FW_VERSION "0.1.2"
+#define LEGATO_FW_VERSION "0.1.3"
 
 #define LVGL_TICK_MS 2
 // Small partial-render buffers keep LVGL in DMA-capable internal RAM; the
@@ -34,7 +34,9 @@ static constexpr uint16_t RELAY_PRESS_MS = 250;
 static constexpr uint32_t BREW_MAX_RUNTIME_MS = 120000;
 static constexpr float BREW_STOP_OFFSET_GRAMS = 0.0f;
 // Tune this lead time to account for machine flow continuing after the stop press.
-static constexpr uint16_t BREW_STOP_ANTICIPATION_MS = 500;
+static constexpr uint16_t BREW_STOP_ANTICIPATION_DEFAULT_MS = 500;
+static constexpr uint16_t BREW_STOP_ANTICIPATION_STEP_MS = 100;
+static constexpr uint16_t BREW_STOP_ANTICIPATION_MAX_MS = 2000;
 static constexpr float MAX_FLOW_RATE_GRAMS_PER_SECOND = 10.0f;
 static constexpr float FLOW_RATE_FILTER_ALPHA = 0.35f;
 static constexpr float BREW_START_MAX_WEIGHT_GRAMS = 5.0f;
@@ -74,6 +76,7 @@ static bool modeButtonPressed = false;
 static bool modeLongActionFired = false;
 static uint32_t modeButtonPressedAt = 0;
 static float liveGrams = 0.0f;
+static uint16_t brewStopAnticipationMs = BREW_STOP_ANTICIPATION_DEFAULT_MS;
 static float targetGrams = 36.0f;
 static float espressoTargetGrams = 36.0f;
 static float americanoTargetGrams = 150.0f;
@@ -113,6 +116,8 @@ static lv_obj_t *combinedButtonLabel = nullptr;
 static lv_obj_t *targetMinusButton = nullptr;
 static lv_obj_t *targetPlusButton = nullptr;
 static lv_obj_t *infoLabel = nullptr;
+static lv_obj_t *infoAnticipationMinusButton = nullptr;
+static lv_obj_t *infoAnticipationPlusButton = nullptr;
 
 // LVGL's installed built-in Montserrat fonts stop at 48 px. Scale glyph
 // bitmaps directly through the font callbacks to get a genuine 60 px layout
@@ -240,7 +245,14 @@ static void loadUiSettings() {
     const uint16_t storedEspresso = prefs.getUShort("espresso_g", 0);
     const uint16_t storedAmericano = prefs.getUShort("americano_g", 0);
     const uint16_t storedBeans = prefs.getUShort("beans_g", 0);
+    const uint16_t storedAnticipationMs = prefs.getUShort(
+        "stop_ms", BREW_STOP_ANTICIPATION_DEFAULT_MS);
     prefs.end();
+
+    if (storedAnticipationMs <= BREW_STOP_ANTICIPATION_MAX_MS &&
+        storedAnticipationMs % BREW_STOP_ANTICIPATION_STEP_MS == 0) {
+      brewStopAnticipationMs = storedAnticipationMs;
+    }
 
     espressoTargetGrams = (storedEspresso >= 5 && storedEspresso <= 100)
                               ? storedEspresso
@@ -278,16 +290,18 @@ static void saveUiSettings() {
   prefs.putUShort("espresso_g", (uint16_t)lroundf(espressoTargetGrams));
   prefs.putUShort("americano_g", (uint16_t)lroundf(americanoTargetGrams));
   prefs.putUShort("beans_g", (uint16_t)lroundf(beanTargetGrams));
+  prefs.putUShort("stop_ms", brewStopAnticipationMs);
   const bool verified = prefs.getUChar("mode", 0xFF) == brewMode &&
                         prefs.getBool("americano", brewMode != MODE_AMERICANO) == (brewMode == MODE_AMERICANO) &&
                         prefs.getUShort("espresso_g", 0) == (uint16_t)lroundf(espressoTargetGrams) &&
                         prefs.getUShort("americano_g", 0) == (uint16_t)lroundf(americanoTargetGrams) &&
-                        prefs.getUShort("beans_g", 0) == (uint16_t)lroundf(beanTargetGrams);
+                        prefs.getUShort("beans_g", 0) == (uint16_t)lroundf(beanTargetGrams) &&
+                        prefs.getUShort("stop_ms", 0xFFFF) == brewStopAnticipationMs;
   prefs.end();
-  Serial.printf("Prefs: target save %s (Espresso %ld g, Americano %ld g, Beans %ld g).\n",
+  Serial.printf("Prefs: settings save %s (Espresso %ld g, Americano %ld g, Beans %ld g, stop anticipation %u ms).\n",
                 verified ? "verified" : "FAILED",
                 lroundf(espressoTargetGrams), lroundf(americanoTargetGrams),
-                lroundf(beanTargetGrams));
+                lroundf(beanTargetGrams), (unsigned)brewStopAnticipationMs);
 }
 
 static uint16_t crc16Timemore(const uint8_t *data, size_t length) {
@@ -782,7 +796,7 @@ static void updateBrewSafety() {
   if (haveFlowRateEstimate &&
       (uint32_t)(millis() - lastFlowRateSampleAt) <= 1000) {
     predictedWeight += estimatedFlowRateGramsPerSecond *
-                       (BREW_STOP_ANTICIPATION_MS / 1000.0f);
+                       (brewStopAnticipationMs / 1000.0f);
   }
   const float stopAt = targetGrams - BREW_STOP_OFFSET_GRAMS;
   if (predictedWeight >= stopAt) {
@@ -809,6 +823,12 @@ static void updateModeLabel() {
   if (infoLabel) {
     if (infoPageActive) lv_obj_clear_flag(infoLabel, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(infoLabel, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_t *infoControls[] = {infoAnticipationMinusButton, infoAnticipationPlusButton};
+  for (lv_obj_t *control : infoControls) {
+    if (!control) continue;
+    if (infoPageActive) lv_obj_clear_flag(control, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(control, LV_OBJ_FLAG_HIDDEN);
   }
 }
 
@@ -842,27 +862,51 @@ static void updateInfoPage() {
       "Mode: %s    Brew: %s\n"
       "Target: %ld g    Weight: %s\n"
       "Scale: %s    DOT battery: %s\n"
-      "\n"
       "Relay pulse: %u ms (active-low)\n"
-      "Manual GPIO%u   Auto GPIO%u\n"
-      "Power GPIO%u\n"
-      "\n"
+      "Manual GPIO%u   Auto GPIO%u   Power GPIO%u\n"
       "Stop anticipation: %u ms\n"
       "Flow estimate: %ld.%ld g/s\n"
       "Max brew: %lu s   Scale-loss stop: 2.5 s\n"
       "Start limit: %d g   Stop offset: %d g\n"
       "Uptime: %lu h %lu min\n"
+      "Tap - / + below to adjust by 100 ms\n"
       "Tap mode to return; hold 3 s for Info",
       LEGATO_FW_VERSION, __DATE__, __TIME__, mode, brewStatus,
       lroundf(targetGrams), weightText, scaleStatus, batteryText,
       RELAY_PRESS_MS, RELAY_MANUAL_PIN, RELAY_AUTO_PIN, RELAY_POWER_PIN,
-      BREW_STOP_ANTICIPATION_MS,
+      (unsigned)brewStopAnticipationMs,
       (long)(lroundf(estimatedFlowRateGramsPerSecond * 10.0f) / 10),
       (long)(labs(lroundf(estimatedFlowRateGramsPerSecond * 10.0f)) % 10),
       (unsigned long)(BREW_MAX_RUNTIME_MS / 1000),
       (int)BREW_START_MAX_WEIGHT_GRAMS, (int)BREW_STOP_OFFSET_GRAMS,
       (unsigned long)(uptimeSeconds / 3600),
       (unsigned long)((uptimeSeconds / 60) % 60));
+}
+
+static void onAnticipationMinus(lv_event_t *) {
+  if (!infoPageActive || brewStopAnticipationMs == 0) return;
+  if (brewStopAnticipationMs >= BREW_STOP_ANTICIPATION_STEP_MS) {
+    brewStopAnticipationMs -= BREW_STOP_ANTICIPATION_STEP_MS;
+  } else {
+    brewStopAnticipationMs = 0;
+  }
+  saveUiSettings();
+  updateInfoPage();
+  Serial.printf("Brew stop anticipation set to %u ms.\n",
+                (unsigned)brewStopAnticipationMs);
+}
+
+static void onAnticipationPlus(lv_event_t *) {
+  if (!infoPageActive ||
+      brewStopAnticipationMs >= BREW_STOP_ANTICIPATION_MAX_MS) return;
+  brewStopAnticipationMs += BREW_STOP_ANTICIPATION_STEP_MS;
+  if (brewStopAnticipationMs > BREW_STOP_ANTICIPATION_MAX_MS) {
+    brewStopAnticipationMs = BREW_STOP_ANTICIPATION_MAX_MS;
+  }
+  saveUiSettings();
+  updateInfoPage();
+  Serial.printf("Brew stop anticipation set to %u ms.\n",
+                (unsigned)brewStopAnticipationMs);
 }
 
 static void updateDisplayValues() {
@@ -1071,13 +1115,19 @@ static void createUi() {
 
   infoLabel = lv_label_create(screen);
   lv_obj_set_width(infoLabel, 400);
-  lv_obj_set_height(infoLabel, 330);
-  lv_obj_align(infoLabel, LV_ALIGN_CENTER, 0, 44);
+  lv_obj_set_height(infoLabel, 286);
+  lv_obj_align(infoLabel, LV_ALIGN_CENTER, 0, 24);
   lv_obj_set_style_text_color(infoLabel, lv_color_hex(0xD7E2DE), 0);
   lv_obj_set_style_text_font(infoLabel, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_align(infoLabel, LV_TEXT_ALIGN_LEFT, 0);
+  lv_obj_set_style_text_align(infoLabel, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(infoLabel, LV_LABEL_LONG_WRAP);
   lv_obj_add_flag(infoLabel, LV_OBJ_FLAG_HIDDEN);
+  infoAnticipationMinusButton = makeButton(screen, "-100 ms", 63, 404, 150, 44,
+                                           onAnticipationMinus, &lv_font_montserrat_16);
+  infoAnticipationPlusButton = makeButton(screen, "+100 ms", 253, 404, 150, 44,
+                                          onAnticipationPlus, &lv_font_montserrat_16);
+  lv_obj_add_flag(infoAnticipationMinusButton, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(infoAnticipationPlusButton, LV_OBJ_FLAG_HIDDEN);
 
   weightLabel = lv_label_create(screen);
   lv_obj_set_width(weightLabel, 260);
