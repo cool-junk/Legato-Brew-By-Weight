@@ -14,7 +14,7 @@
 #include <ctype.h>
 
 // Legato brew-by-weight controller: live DOT weight, touch UI, and relay outputs.
-#define LEGATO_FW_VERSION "0.1.1"
+#define LEGATO_FW_VERSION "0.1.2"
 
 #define LVGL_TICK_MS 2
 // Small partial-render buffers keep LVGL in DMA-capable internal RAM; the
@@ -33,6 +33,10 @@ static constexpr uint8_t RELAY_POWER_PIN = 18;
 static constexpr uint16_t RELAY_PRESS_MS = 250;
 static constexpr uint32_t BREW_MAX_RUNTIME_MS = 120000;
 static constexpr float BREW_STOP_OFFSET_GRAMS = 0.0f;
+// Tune this lead time to account for machine flow continuing after the stop press.
+static constexpr uint16_t BREW_STOP_ANTICIPATION_MS = 500;
+static constexpr float MAX_FLOW_RATE_GRAMS_PER_SECOND = 10.0f;
+static constexpr float FLOW_RATE_FILTER_ALPHA = 0.35f;
 static constexpr float BREW_START_MAX_WEIGHT_GRAMS = 5.0f;
 
 enum BrewState : uint8_t { BREW_IDLE, BREW_RUNNING, BREW_COMPLETE, BREW_STOPPED, BREW_FAULT };
@@ -79,6 +83,9 @@ static BrewMode brewMode = MODE_ESPRESSO;
 static bool infoPageActive = false;
 static BrewMode infoReturnMode = MODE_ESPRESSO;
 static uint32_t lastWeightAt = 0;
+static float estimatedFlowRateGramsPerSecond = 0.0f;
+static uint32_t lastFlowRateSampleAt = 0;
+static bool haveFlowRateEstimate = false;
 static BrewMode activeBrewMode = MODE_ESPRESSO;
 static BrewState brewState = BREW_IDLE;
 static uint32_t brewStartedAt = 0;
@@ -688,6 +695,9 @@ static void startBrew() {
 
   activeBrewMode = brewMode;
   brewStartedAt = millis();
+  estimatedFlowRateGramsPerSecond = 0.0f;
+  lastFlowRateSampleAt = 0;
+  haveFlowRateEstimate = false;
   brewState = BREW_RUNNING;
   if (activeBrewMode == MODE_AMERICANO) relayPress(RELAY_MANUAL_PIN, "Manual Brew start");
   else relayPress(RELAY_AUTO_PIN, "Auto Brew start");
@@ -768,9 +778,15 @@ static void updateBrewSafety() {
     stopBrew(BREW_FAULT, "maximum brew time reached; stop pulse sent - check machine");
     return;
   }
+  float predictedWeight = liveGrams;
+  if (haveFlowRateEstimate &&
+      (uint32_t)(millis() - lastFlowRateSampleAt) <= 1000) {
+    predictedWeight += estimatedFlowRateGramsPerSecond *
+                       (BREW_STOP_ANTICIPATION_MS / 1000.0f);
+  }
   const float stopAt = targetGrams - BREW_STOP_OFFSET_GRAMS;
-  if (liveGrams >= stopAt) {
-    stopBrew(BREW_COMPLETE, "target weight reached; stop pulse sent");
+  if (predictedWeight >= stopAt) {
+    stopBrew(BREW_COMPLETE, "predicted target reached; stop pulse sent");
   }
 }
 
@@ -831,6 +847,8 @@ static void updateInfoPage() {
       "Manual GPIO%u   Auto GPIO%u\n"
       "Power GPIO%u\n"
       "\n"
+      "Stop anticipation: %u ms\n"
+      "Flow estimate: %ld.%ld g/s\n"
       "Max brew: %lu s   Scale-loss stop: 2.5 s\n"
       "Start limit: %d g   Stop offset: %d g\n"
       "Uptime: %lu h %lu min\n"
@@ -838,6 +856,9 @@ static void updateInfoPage() {
       LEGATO_FW_VERSION, __DATE__, __TIME__, mode, brewStatus,
       lroundf(targetGrams), weightText, scaleStatus, batteryText,
       RELAY_PRESS_MS, RELAY_MANUAL_PIN, RELAY_AUTO_PIN, RELAY_POWER_PIN,
+      BREW_STOP_ANTICIPATION_MS,
+      (long)(lroundf(estimatedFlowRateGramsPerSecond * 10.0f) / 10),
+      (long)(labs(lroundf(estimatedFlowRateGramsPerSecond * 10.0f)) % 10),
       (unsigned long)(BREW_MAX_RUNTIME_MS / 1000),
       (int)BREW_START_MAX_WEIGHT_GRAMS, (int)BREW_STOP_OFFSET_GRAMS,
       (unsigned long)(uptimeSeconds / 3600),
@@ -1053,7 +1074,7 @@ static void createUi() {
   lv_obj_set_height(infoLabel, 330);
   lv_obj_align(infoLabel, LV_ALIGN_CENTER, 0, 44);
   lv_obj_set_style_text_color(infoLabel, lv_color_hex(0xD7E2DE), 0);
-  lv_obj_set_style_text_font(infoLabel, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_font(infoLabel, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_align(infoLabel, LV_TEXT_ALIGN_LEFT, 0);
   lv_label_set_long_mode(infoLabel, LV_LABEL_LONG_WRAP);
   lv_obj_add_flag(infoLabel, LV_OBJ_FLAG_HIDDEN);
@@ -1162,10 +1183,31 @@ static void processAppEvents() {
       Serial.println("UI: DOT disconnected/searching.");
       displayChanged = true;
     } else if (event.kind == EVENT_WEIGHT) {
+      const uint32_t weightSampleAt = millis();
+      if (brewState == BREW_RUNNING && haveWeight) {
+        const uint32_t sampleIntervalMs = weightSampleAt - lastWeightAt;
+        if (sampleIntervalMs > 0 && sampleIntervalMs <= 2500) {
+          float sampleRate = (event.grams - liveGrams) * 1000.0f /
+                             sampleIntervalMs;
+          if (sampleRate < 0.0f) sampleRate = 0.0f;
+          if (sampleRate > MAX_FLOW_RATE_GRAMS_PER_SECOND) {
+            sampleRate = MAX_FLOW_RATE_GRAMS_PER_SECOND;
+          }
+          if (haveFlowRateEstimate) {
+            estimatedFlowRateGramsPerSecond =
+                FLOW_RATE_FILTER_ALPHA * sampleRate +
+                (1.0f - FLOW_RATE_FILTER_ALPHA) * estimatedFlowRateGramsPerSecond;
+          } else {
+            estimatedFlowRateGramsPerSecond = sampleRate;
+            haveFlowRateEstimate = true;
+          }
+          lastFlowRateSampleAt = weightSampleAt;
+        }
+      }
       bleConnected = true;
       haveWeight = true;
       liveGrams = event.grams;
-      lastWeightAt = millis();
+      lastWeightAt = weightSampleAt;
       displayChanged = true;
       const int32_t tenths = (int32_t)lroundf(liveGrams * 10.0f);
       Serial.printf("DOT weight: %ld.%01ld g\n", (long)(tenths / 10),
