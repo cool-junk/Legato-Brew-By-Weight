@@ -636,10 +636,10 @@ static void updateCombinedButtonUi() {
     caption = "TAP TO STOP";
     color = 0x7A2929;
   } else if (brewState == BREW_FAULT) {
-    caption = "TAP TO TARE /\nHOLD TO CLEAR FAULT";
+    caption = "TAP TO TARE\nHOLD TO CLEAR FAULT";
     color = 0x7A2929;
   } else {
-    caption = "TAP TO TARE /\nHOLD TO START";
+    caption = "TAP TO TARE\nHOLD TO START";
   }
   lv_label_set_text(combinedButtonLabel, caption);
   lv_obj_set_style_bg_color(combinedButton, lv_color_hex(color), 0);
@@ -1086,7 +1086,7 @@ static void createUi() {
   lv_obj_set_style_text_font(batteryLabel, &lv_font_montserrat_16, 0);
   lv_label_set_text(batteryLabel, "BAT --%");
 
-  combinedButton = makeButton(screen, "TAP TO TARE /\nHOLD TO START",
+  combinedButton = makeButton(screen, "TAP TO TARE\nHOLD TO START",
                               43, 246, 380, 108, onCombinedButton,
                               &lv_font_montserrat_32, &combinedButtonLabel);
   lv_obj_set_width(combinedButtonLabel, LV_PCT(100));
