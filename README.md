@@ -1,6 +1,6 @@
 # Legato brew-by-weight screen prototype
 
-This firmware combines the Waveshare ESP32-S3-Touch-AMOLED-1.75 display/touch setup with live Timemore DOT BLE readings and active-low control of the verified four-channel relay module.
+This firmware combines the Waveshare ESP32-S3-Touch-AMOLED-1.75 display/touch setup with live Timemore DOT BLE readings and active-high control of three TLP222A PhotoMOS relays.
 
 ## Screen
 
@@ -11,17 +11,17 @@ This firmware combines the Waveshare ESP32-S3-Touch-AMOLED-1.75 display/touch se
 - The main control shows **TAP TO TARE** and **HOLD TO START** on separate centered lines in Espresso and Americano modes. It uses 32 px text and spans most of the screen width. During a cycle it reads **TAP TO STOP**. Target adjustment buttons are below it.
 - Espresso uses the Auto Brew relay; Americano water uses the Manual Brew relay. Reaching the scale target sends the corresponding second press automatically. Beans mode keeps the same control as a tare-only button.
 - The separate **POWER** control stays at the top center and pulses the machine power button while no brew is active. The progress ring has a gap aligned from one edge of that button to the opposite edge. The sketch does not sense or display the machine's actual power state.
-- The firmware version is `0.1.3`; the centered Info page shows this version and compile date/time, current mode/brew state/target, scale connection/live weight/battery, relay pulse duration and GPIO assignments, safety limits, stop-anticipation delay, estimated flow rate, and device uptime. Relay on time is the configured 250 ms press pulse. Open/close Info with a three-second hold on the mode pill.
+- The firmware version is `0.1.4`; the centered Info page shows this version and compile date/time, current mode/brew state/target, scale connection/live weight/battery, PhotoMOS pulse duration and GPIO assignments, safety limits, stop-anticipation delay, estimated flow rate, and device uptime. Output on time is the configured 250 ms button pulse. Open/close Info with a three-second hold on the mode pill.
 - Brew stop anticipates scale and machine lag: while brewing, the sketch estimates recent positive flow and compares projected weight after the configured anticipation delay against the target. On the Info page, `-100 ms` and `+100 ms` adjust the delay from 0 to 2000 ms. The default is 500 ms, and the value persists across reboots. Higher values stop earlier. The flow estimate is filtered and capped at 10 g/s; if no recent estimate is available, the controller falls back to the measured target.
 - BLE status changes between searching, waiting for weight, and live.
 - DOT battery percentage appears below the combined control and above the progress ring. It turns red below 20%. The sketch tries the standard BLE Battery Service when present, otherwise requests the DOT-specific report every five seconds until one arrives, then refreshes once per minute.
 
 ## Relay operation
 
-- GPIO16 → relay IN1 (Manual Brew); GPIO17 → IN2 (Auto Brew); GPIO18 → IN3 (Power). The relay inputs are active-low; all three are set HIGH/off at startup. Use the tested 5 V supply and input ground reference for the module. Keep machine-side contacts isolated from ESP32 ground.
+- GPIO16 → Manual Brew TLP222A LED input; GPIO17 → Auto Brew; GPIO18 → Power. Each GPIO drives TLP222A pin 1 through a 330 Ω series resistor; pin 2 goes to ESP32 GND. A 10 kΩ pull-down from each GPIO to ESP32 GND keeps the PhotoMOS off during boot. Inputs are active-high; all three are set LOW/off at startup. TLP222A pins 3 and 4 go across the corresponding button's two switch pads and remain electrically isolated from ESP32 GND. Do not tie the three output pairs together. Confirm the switch nodes are low-voltage and within TLP222A's 60 V off-state output rating; this part is not for switching mains.
 - Each press is a 250 ms pulse. The sketch never pulses two channels simultaneously. In Beans mode the combined control only tares and does not start or stop a brew output.
 - Brew start requires fresh DOT data and a displayed weight no higher than 5 g, so place the cup and tare first. It stops at the saved target with a 0 g stop offset. A fresh-data timeout of 2.5 seconds or a 120-second maximum runtime sends one stop pulse and latches a fault; inspect the machine before acknowledging that fault on screen.
-- The relay integration was reported working by the user. This latest combined-button UI revision has not been compiled or uploaded yet. The separate `Legato_Relay_Bench_Test` sketch remains available for relay-only checks.
+- The user confirms the TLP222A wiring and active-high firmware operate the machine as intended. `Legato_Relay_Bench_Test` is an active-high PhotoMOS bench sketch; keep its machine-side output wires disconnected during bench checks.
 
 ## BLE
 

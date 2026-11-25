@@ -14,7 +14,7 @@
 #include <ctype.h>
 
 // Legato brew-by-weight controller: live DOT weight, touch UI, and relay outputs.
-#define LEGATO_FW_VERSION "0.1.3"
+#define LEGATO_FW_VERSION "0.1.4"
 
 #define LVGL_TICK_MS 2
 // Small partial-render buffers keep LVGL in DMA-capable internal RAM; the
@@ -635,15 +635,15 @@ static bool scaleDataFresh() {
 }
 
 static void relayPress(uint8_t pin, const char *name) {
-  // Outputs are active-low. Keep every other channel inactive to prevent
-  // overlapping resistor-ladder button presses.
-  digitalWrite(RELAY_MANUAL_PIN, HIGH);
-  digitalWrite(RELAY_AUTO_PIN, HIGH);
-  digitalWrite(RELAY_POWER_PIN, HIGH);
+  // TLP222A input LEDs are active-high. Keep all unselected channels LOW so
+  // only one isolated switch contact can close at a time.
+  digitalWrite(RELAY_MANUAL_PIN, LOW);
+  digitalWrite(RELAY_AUTO_PIN, LOW);
+  digitalWrite(RELAY_POWER_PIN, LOW);
   Serial.printf("Relay: press %s (%u ms).\n", name, RELAY_PRESS_MS);
-  digitalWrite(pin, LOW);
-  delay(RELAY_PRESS_MS);
   digitalWrite(pin, HIGH);
+  delay(RELAY_PRESS_MS);
+  digitalWrite(pin, LOW);
 }
 
 static void updateCombinedButtonUi() {
@@ -862,7 +862,7 @@ static void updateInfoPage() {
       "Mode: %s    Brew: %s\n"
       "Target: %ld g    Weight: %s\n"
       "Scale: %s    DOT battery: %s\n"
-      "Relay pulse: %u ms (active-low)\n"
+      "TLP222A pulse: %u ms (active-high)\n"
       "Manual GPIO%u   Auto GPIO%u   Power GPIO%u\n"
       "Stop anticipation: %u ms\n"
       "Flow estimate: %ld.%ld g/s\n"
@@ -1285,11 +1285,11 @@ static void processAppEvents() {
 static void initRelayOutputs() {
   const uint8_t pins[] = {RELAY_MANUAL_PIN, RELAY_AUTO_PIN, RELAY_POWER_PIN};
   for (uint8_t pin : pins) {
-    // The module is active-low. Preload HIGH before setting OUTPUT so boot
-    // starts with every relay released.
-    digitalWrite(pin, HIGH);
+    // TLP222A LED inputs turn on at HIGH. Preload LOW before output mode so
+    // boot starts with all three PhotoMOS contacts open.
+    digitalWrite(pin, LOW);
     pinMode(pin, OUTPUT);
-    digitalWrite(pin, HIGH);
+    digitalWrite(pin, LOW);
   }
 }
 
@@ -1297,8 +1297,8 @@ void setup() {
   initRelayOutputs();
   Serial.begin(115200);
   delay(400);
-  Serial.println("Legato brew-by-weight controller. Active-low relay outputs are initialized OFF.");
-  Serial.println("Relay map: GPIO16 Manual, GPIO17 Auto, GPIO18 Power.");
+  Serial.println("Legato brew-by-weight controller. Active-high TLP222A outputs initialized OFF.");
+  Serial.println("PhotoMOS map: GPIO16 Manual, GPIO17 Auto, GPIO18 Power.");
 
   Wire.begin(IIC_SDA, IIC_SCL);
   digitalWrite(TP_RESET, LOW);
